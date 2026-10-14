@@ -1,0 +1,15 @@
+# secrets
+.env
+.env.*
+*.env
+!.env.example
+
+# build
+/bin/
+/v2v-bot
+
+# runtime data
+*.log
+
+# throwaway scratch (reusable helpers go to minions/, which IS tracked)
+tmp/
