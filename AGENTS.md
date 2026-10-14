@@ -7,7 +7,7 @@ holds **no conversation logic** — sessions, topics, spend limits, STT, the
 grounded dialogue, TTS, turn/lead logs all live in the engine
 (`~/wrk/demo/v2v-demo/v2v-demo`, package `internal/engine`).
 
-**Status: skeleton.** There is no Go code yet. Start with `docs/HANDOFF.md`: it
+**Status: first implementation (2026-10-14)** — transport, engine client, adapter and config are in; not yet verified live or cut over. `docs/HANDOFF.md`
 lists what to port from v2v-demo, the contract to implement against
 (`docs/channel-api.md` in v2v-demo), the behaviours that must survive the move,
 and the cutover plan for the live bot.
