@@ -81,15 +81,16 @@ func (a *Adapter) handleUpdate(ctx context.Context, u telegram.Update) {
 	// an inline-keyboard tap always resolves before anything else, and is always
 	// acknowledged — even when its payload is not one of ours or the engine is down.
 	if u.CallbackID != "" {
+		// Ack first: Telegram wants the answer promptly and the turn may take a while.
+		if err := a.tg.AnswerCallback(ctx, u.CallbackID); err != nil {
+			log.Printf("answer callback (chat %d): %v", u.ChatID, err)
+		}
 		var out engineclient.Output
 		failed := false
 		if id, ok := strings.CutPrefix(u.CallbackData, topicCallbackPrefix); ok && id != "" {
 			out, failed = a.turn(ctx, u.ChatID, engineclient.Event{Pick: id}, false)
 		} else {
 			log.Printf("unknown topic callback (chat %d): %q", u.ChatID, u.CallbackData)
-		}
-		if err := a.tg.AnswerCallback(ctx, u.CallbackID); err != nil {
-			log.Printf("answer callback (chat %d): %v", u.ChatID, err)
 		}
 		a.finish(ctx, u.ChatID, out, failed)
 		return

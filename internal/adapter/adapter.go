@@ -116,7 +116,16 @@ func (a *Adapter) chatWorker(ctx context.Context, chatID int64, ch chan telegram
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			// shutdown: Telegram's offset already moved past what is queued, so
+			// answer it rather than drop it
+			for {
+				select {
+				case u := <-ch:
+					a.handleUpdate(context.WithoutCancel(ctx), u)
+				default:
+					return
+				}
+			}
 		case u := <-ch:
 			// an update already taken off the queue is finished even when shutdown
 			// begins (the engine completes the turn regardless; dropping its reply
@@ -133,6 +142,7 @@ func (a *Adapter) chatWorker(ctx context.Context, chatID int64, ch chan telegram
 			a.mu.Lock()
 			if len(ch) == 0 { // dispatch queues under a.mu, so this is exact
 				delete(a.inbox, chatID)
+				delete(a.slow, chatID) // per-chat state goes with the worker
 				a.mu.Unlock()
 				return
 			}

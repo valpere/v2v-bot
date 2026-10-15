@@ -347,3 +347,42 @@ func waitFor(t *testing.T, cond func() bool) {
 		time.Sleep(5 * time.Millisecond)
 	}
 }
+
+// Telegram wants the callback answered promptly: the ack goes out before the
+// (possibly slow) engine call, not after it.
+func TestCallbackIsAckedBeforeTheEngineCall(t *testing.T) {
+	var tg *fakeTG
+	var ackedAtCall bool
+	eng := &fakeEngine{reply: func(int64, engineclient.Event) (engineclient.Output, error) {
+		for _, c := range tg.calls() {
+			ackedAtCall = ackedAtCall || c == "ack:cb"
+		}
+		return textOut("hi"), nil
+	}}
+	var a *Adapter
+	a, tg = newAdapter(eng)
+	a.handleUpdate(context.Background(), telegram.Update{ChatID: 1, CallbackID: "cb", CallbackData: "topic:x"})
+	if !ackedAtCall {
+		t.Fatal("the callback was not acknowledged before the engine call")
+	}
+}
+
+// Updates already queued when shutdown begins were taken off Telegram's offset:
+// the worker answers them instead of dropping them.
+func TestQueuedUpdatesAreDrainedOnShutdown(t *testing.T) {
+	eng := &fakeEngine{reply: func(_ int64, ev engineclient.Event) (engineclient.Output, error) {
+		return textOut("re:" + ev.Text), nil
+	}}
+	a, tg := newAdapter(eng)
+	ch := make(chan telegram.Update, 3)
+	for _, s := range []string{"a", "b", "c"} {
+		ch <- telegram.Update{ChatID: 1, Text: s}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // shutdown has already begun
+	a.wg.Add(1)
+	a.chatWorker(ctx, 1, ch)
+	if got := tg.textsTo(1); len(got) != 3 || got[0] != "re:a" || got[2] != "re:c" {
+		t.Fatalf("queued updates must be answered in order: %v", got)
+	}
+}

@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"log"
+	"net/url"
 	"os/signal"
 	"syscall"
 
@@ -14,6 +15,14 @@ import (
 	"github.com/valpere/v2v-bot/internal/engineclient"
 	"github.com/valpere/v2v-bot/internal/telegram"
 )
+
+// engineHost is the host part of the engine URL, safe to log.
+func engineHost(raw string) string {
+	if u, err := url.Parse(raw); err == nil {
+		return u.Host
+	}
+	return "?"
+}
 
 func main() {
 	cfg, err := config.Load()
@@ -33,7 +42,7 @@ func main() {
 		log.Fatal(err)
 	}
 	a := adapter.New(tg, engineclient.New(cfg.EngineURL, cfg.EngineKey, cfg.EngineTimeout))
-	log.Printf("v2v-bot: listening, engine %s", cfg.EngineURL)
+	log.Printf("v2v-bot: listening, engine host %s", engineHost(cfg.EngineURL)) // never the full URL: it may carry credentials
 	a.Run(ctx, updates)
 	log.Print("v2v-bot: shut down")
 }
