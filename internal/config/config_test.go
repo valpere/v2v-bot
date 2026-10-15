@@ -59,3 +59,11 @@ func TestLoadValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestQuotedValueKeepsHash(t *testing.T) {
+	inDir(t, "TELEGRAM_BOT_TOKEN=t\nENGINE_KEY=\"abc #def\"  # note\n")
+	c, err := Load()
+	if err != nil || c.EngineKey != "abc #def" {
+		t.Fatalf("%+v %v", c, err)
+	}
+}

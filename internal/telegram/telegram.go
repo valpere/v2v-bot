@@ -348,12 +348,15 @@ func (c *client) SendButtons(ctx context.Context, chatID int64, text string, but
 	for i, b := range buttons {
 		rows[i] = []models.InlineKeyboardButton{{Text: b.Label, CallbackData: b.Data}}
 	}
-	_, err := c.b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID:             chatID,
-		Text:               text,
-		ParseMode:          models.ParseModeHTML,
-		LinkPreviewOptions: &models.LinkPreviewOptions{IsDisabled: bot.True()},
-		ReplyMarkup:        models.InlineKeyboardMarkup{InlineKeyboard: rows},
+	err := withRetry(ctx, func() error {
+		_, err := c.b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:             chatID,
+			Text:               text,
+			ParseMode:          models.ParseModeHTML,
+			LinkPreviewOptions: &models.LinkPreviewOptions{IsDisabled: bot.True()},
+			ReplyMarkup:        models.InlineKeyboardMarkup{InlineKeyboard: rows},
+		})
+		return err
 	})
 	if err != nil {
 		return fmt.Errorf("telegram: sendMessage (buttons): %w", err)

@@ -94,10 +94,23 @@ func readDotEnv(path string) (map[string]string, error) {
 		if !ok {
 			return nil, fmt.Errorf("%s: malformed line %q", path, line)
 		}
-		if i := strings.Index(v, " #"); i >= 0 {
-			v = v[:i]
-		}
-		out[strings.TrimSpace(k)] = strings.Trim(strings.TrimSpace(v), `"'`)
+		out[strings.TrimSpace(k)] = parseValue(v)
 	}
 	return out, sc.Err()
+}
+
+// parseValue unquotes a "…" or '…' value (a '#' inside quotes is data, and
+// anything after the closing quote is a comment); an unquoted value ends at
+// " #".
+func parseValue(v string) string {
+	v = strings.TrimSpace(v)
+	if v != "" && (v[0] == '"' || v[0] == '\'') {
+		if end := strings.IndexByte(v[1:], v[0]); end >= 0 {
+			return v[1 : 1+end]
+		}
+	}
+	if i := strings.Index(v, " #"); i >= 0 {
+		v = v[:i]
+	}
+	return strings.TrimSpace(v)
 }
