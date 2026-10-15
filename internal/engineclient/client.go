@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -123,7 +124,7 @@ func (c *Client) Turn(ctx context.Context, chatID int64, ev Event) (Output, erro
 	hr.Header.Set("Content-Type", "application/json")
 	resp, err := c.http.Do(hr)
 	if err != nil {
-		return Output{}, fmt.Errorf("engine turn: %w", errors.Unwrap(err)) // drop the URL from the message
+		return Output{}, fmt.Errorf("engine turn: %w", withoutURL(err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -158,9 +159,9 @@ type Verdict struct {
 
 // paidAttempts bounds how often a payment confirmation is sent; retryWait is the
 // pause before the next attempt (a var so tests need not really sleep).
-const paidAttempts = 4
+const paidAttempts = 5
 
-var retryWait = 500 * time.Millisecond
+var retryWait = time.Second
 
 // post sends one payments request and decodes the JSON answer into out. The
 // returned status is 0 for a transport failure.
@@ -177,7 +178,7 @@ func (c *Client) post(ctx context.Context, path string, body, out any) (int, err
 	hr.Header.Set("Content-Type", "application/json")
 	resp, err := c.http.Do(hr)
 	if err != nil {
-		return 0, fmt.Errorf("engine %s: %w", path, errors.Unwrap(err)) // drop the URL from the message
+		return 0, fmt.Errorf("engine %s: %w", path, withoutURL(err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -216,7 +217,8 @@ func (c *Client) Paid(ctx context.Context, orderID string, stars int, chargeID s
 		if err == nil {
 			return r.Duplicate, nil
 		}
-		if (status >= 400 && status < 500) || attempt >= paidAttempts || ctx.Err() != nil {
+		final4xx := status >= 400 && status < 500 && status != http.StatusRequestTimeout && status != http.StatusTooManyRequests
+		if final4xx || attempt >= paidAttempts || ctx.Err() != nil {
 			return false, err
 		}
 		select {
@@ -225,4 +227,14 @@ func (c *Client) Paid(ctx context.Context, orderID string, stars int, chargeID s
 		case <-time.After(retryWait * time.Duration(attempt)):
 		}
 	}
+}
+
+// withoutURL strips the request URL (which names the engine) from a transport
+// error, keeping the cause.
+func withoutURL(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return ue.Err
+	}
+	return err
 }
