@@ -172,3 +172,24 @@ func TestPaidRetriesTransientFailuresOnly(t *testing.T) {
 		t.Fatalf("5xx: err=%v calls=%d", err, calls.Load())
 	}
 }
+
+func TestPaidRetriesRateLimitAndTimeout(t *testing.T) {
+	old := retryWait
+	retryWait = time.Millisecond
+	defer func() { retryWait = old }()
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch calls.Add(1) {
+		case 1:
+			http.Error(w, "slow down", http.StatusTooManyRequests)
+		case 2:
+			http.Error(w, "timeout", http.StatusRequestTimeout)
+		default:
+			io.WriteString(w, `{"ok":true,"duplicate":false}`)
+		}
+	}))
+	defer srv.Close()
+	if _, err := New(srv.URL, key, time.Second).Paid(context.Background(), "o", 1, "c"); err != nil || calls.Load() != 3 {
+		t.Fatalf("err=%v calls=%d", err, calls.Load())
+	}
+}

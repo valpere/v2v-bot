@@ -58,6 +58,10 @@ func (a *Adapter) preCheckout(ctx context.Context, p *telegram.PreCheckout) {
 }
 
 func (a *Adapter) paid(ctx context.Context, chatID int64, p *telegram.Payment) {
+	if p.Currency != "XTR" || p.OrderID == "" {
+		log.Printf("ignoring a payment that is not one of our Stars orders: chat=%d currency=%q order=%q charge=%s", chatID, p.Currency, p.OrderID, p.ChargeID)
+		return
+	}
 	// The money has moved: finish even when shutdown has begun.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()

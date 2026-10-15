@@ -498,3 +498,17 @@ func TestPaymentUpdatesBypassTheChatQueue(t *testing.T) {
 	close(release)
 	a.wg.Wait()
 }
+
+func TestAPaymentThatIsNotOursIsNotForwarded(t *testing.T) {
+	eng := &fakeEngine{}
+	a, tg := newAdapter(eng)
+	for _, p := range []*telegram.Payment{
+		{OrderID: "o", Currency: "USD", Stars: 5, ChargeID: "c"},
+		{OrderID: "", Currency: "XTR", Stars: 5, ChargeID: "c"},
+	} {
+		a.handlePayment(context.Background(), telegram.Update{ChatID: 5, Payment: p})
+	}
+	if len(eng.paid) != 0 || len(tg.textsTo(5)) != 0 {
+		t.Fatalf("engine=%v texts=%v", eng.paid, tg.textsTo(5))
+	}
+}
