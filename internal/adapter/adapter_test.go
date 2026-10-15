@@ -3,8 +3,10 @@ package adapter
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -73,9 +75,13 @@ type call struct {
 }
 
 type fakeEngine struct {
-	mu    sync.Mutex
-	calls []call
-	reply func(chat int64, ev engineclient.Event) (engineclient.Output, error)
+	mu         sync.Mutex
+	calls      []call
+	pre, paid  []string
+	verdict    engineclient.Verdict
+	verdictErr error
+	paidErr    error
+	reply      func(chat int64, ev engineclient.Event) (engineclient.Output, error)
 }
 
 func (e *fakeEngine) Turn(_ context.Context, chat int64, ev engineclient.Event) (engineclient.Output, error) {
@@ -385,4 +391,110 @@ func TestQueuedUpdatesAreDrainedOnShutdown(t *testing.T) {
 	if got := tg.textsTo(1); len(got) != 3 || got[0] != "re:a" || got[2] != "re:c" {
 		t.Fatalf("queued updates must be answered in order: %v", got)
 	}
+}
+
+func (f *fakeTG) AnswerPreCheckout(_ context.Context, id string, ok bool, msg string) error {
+	f.rec(fmt.Sprintf("precheckout:%s:%v:%s", id, ok, msg))
+	return nil
+}
+
+func (e *fakeEngine) PreCheckout(_ context.Context, order string, stars int) (engineclient.Verdict, error) {
+	e.mu.Lock()
+	e.pre = append(e.pre, fmt.Sprintf("%s:%d", order, stars))
+	e.mu.Unlock()
+	return e.verdict, e.verdictErr
+}
+
+func (e *fakeEngine) Paid(_ context.Context, order string, stars int, charge string) (bool, error) {
+	e.mu.Lock()
+	e.paid = append(e.paid, fmt.Sprintf("%s:%d:%s", order, stars, charge))
+	e.mu.Unlock()
+	return false, e.paidErr
+}
+
+func TestPreCheckoutIsAnsweredWithTheEnginesVerdict(t *testing.T) {
+	eng := &fakeEngine{verdict: engineclient.Verdict{OK: true}}
+	a, tg := newAdapter(eng)
+	a.handlePayment(context.Background(), telegram.Update{ChatID: 9, PreCheckout: &telegram.PreCheckout{ID: "q1", OrderID: "ord1", Currency: "XTR", Stars: 35}})
+	if got := tg.calls(); len(got) != 1 || got[0] != "precheckout:q1:true:" {
+		t.Fatalf("calls %v", got)
+	}
+	if len(eng.pre) != 1 || eng.pre[0] != "ord1:35" {
+		t.Fatalf("engine saw %v", eng.pre)
+	}
+
+	eng2 := &fakeEngine{verdict: engineclient.Verdict{Error: "Замовлення застаріло"}}
+	a2, tg2 := newAdapter(eng2)
+	a2.handlePayment(context.Background(), telegram.Update{ChatID: 9, PreCheckout: &telegram.PreCheckout{ID: "q2", OrderID: "o", Currency: "XTR", Stars: 1}})
+	if got := tg2.calls(); len(got) != 1 || got[0] != "precheckout:q2:false:Замовлення застаріло" {
+		t.Fatalf("refused: %v", got)
+	}
+}
+
+func TestPreCheckoutIsAlwaysAnswered(t *testing.T) {
+	// engine down: Telegram still needs an answer, and a refusal is the safe one
+	a, tg := newAdapter(&fakeEngine{verdictErr: errors.New("down")})
+	a.handlePayment(context.Background(), telegram.Update{ChatID: 9, PreCheckout: &telegram.PreCheckout{ID: "q1", OrderID: "o", Currency: "XTR", Stars: 1}})
+	if got := tg.calls(); len(got) != 1 || !strings.HasPrefix(got[0], "precheckout:q1:false:") {
+		t.Fatalf("engine down: %v", got)
+	}
+	// anything but Stars is refused without bothering the engine
+	eng := &fakeEngine{verdict: engineclient.Verdict{OK: true}}
+	a, tg = newAdapter(eng)
+	a.handlePayment(context.Background(), telegram.Update{ChatID: 9, PreCheckout: &telegram.PreCheckout{ID: "q3", OrderID: "o", Currency: "USD", Stars: 1}})
+	if got := tg.calls(); len(got) != 1 || !strings.HasPrefix(got[0], "precheckout:q3:false:") || len(eng.pre) != 0 {
+		t.Fatalf("non-Stars: %v engine=%v", got, eng.pre)
+	}
+}
+
+func TestSuccessfulPaymentIsRecordedThenConfirmed(t *testing.T) {
+	eng := &fakeEngine{}
+	a, tg := newAdapter(eng)
+	a.handlePayment(context.Background(), telegram.Update{ChatID: 5, Payment: &telegram.Payment{OrderID: "ord1", Currency: "XTR", Stars: 35, ChargeID: "ch1"}})
+	if len(eng.paid) != 1 || eng.paid[0] != "ord1:35:ch1" {
+		t.Fatalf("engine saw %v", eng.paid)
+	}
+	if got := tg.textsTo(5); len(got) != 1 || !strings.Contains(got[0], "35") {
+		t.Fatalf("confirmation: %v", got)
+	}
+}
+
+func TestSuccessfulPaymentTheEngineCouldNotRecordStillTellsTheUser(t *testing.T) {
+	a, tg := newAdapter(&fakeEngine{paidErr: errors.New("down")})
+	a.handlePayment(context.Background(), telegram.Update{ChatID: 5, Payment: &telegram.Payment{OrderID: "ord1", Currency: "XTR", Stars: 35, ChargeID: "ch1"}})
+	got := tg.textsTo(5)
+	if len(got) != 1 || !strings.Contains(got[0], "ch1") {
+		t.Fatalf("the user must get the charge id to quote: %v", got)
+	}
+}
+
+func TestPaymentUpdatesBypassTheChatQueue(t *testing.T) {
+	// a slow turn in flight must not delay Telegram's 10 s pre-checkout deadline
+	release := make(chan struct{})
+	eng := &fakeEngine{verdict: engineclient.Verdict{OK: true}, reply: func(int64, engineclient.Event) (engineclient.Output, error) {
+		<-release
+		return engineclient.Output{}, nil
+	}}
+	a, tg := newAdapter(eng)
+	a.idleEvict = 20 * time.Millisecond // so wg.Wait below can return
+	ctx := context.Background()
+	a.dispatch(ctx, telegram.Update{ChatID: 9, Text: "hi"})
+	a.dispatch(ctx, telegram.Update{ChatID: 9, PreCheckout: &telegram.PreCheckout{ID: "q1", OrderID: "o", Currency: "XTR", Stars: 1}})
+	deadline := time.Now().Add(2 * time.Second)
+	has := func() bool {
+		for _, c := range tg.calls() {
+			if c == "precheckout:q1:true:" {
+				return true
+			}
+		}
+		return false
+	}
+	for time.Now().Before(deadline) && !has() {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !has() {
+		t.Fatalf("pre-checkout waited behind the turn: %v", tg.calls())
+	}
+	close(release)
+	a.wg.Wait()
 }

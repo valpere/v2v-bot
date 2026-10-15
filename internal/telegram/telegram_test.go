@@ -131,3 +131,25 @@ func TestSafeFilePath(t *testing.T) {
 		}
 	}
 }
+
+func TestToUpdatePayments(t *testing.T) {
+	pre := &models.Update{PreCheckoutQuery: &models.PreCheckoutQuery{
+		ID: "q1", From: &models.User{ID: 9}, Currency: "XTR", TotalAmount: 35, InvoicePayload: "ord1",
+	}}
+	got, ok := toUpdate(pre)
+	want := Update{ChatID: 9, PreCheckout: &PreCheckout{ID: "q1", OrderID: "ord1", Currency: "XTR", Stars: 35}}
+	if !ok || got.ChatID != want.ChatID || got.PreCheckout == nil || *got.PreCheckout != *want.PreCheckout {
+		t.Fatalf("pre_checkout_query: ok=%v got=%+v", ok, got)
+	}
+	if _, ok := toUpdate(&models.Update{PreCheckoutQuery: &models.PreCheckoutQuery{ID: "q"}}); ok {
+		t.Error("a pre_checkout_query without a sender cannot be routed")
+	}
+
+	paid := &models.Update{Message: &models.Message{Chat: models.Chat{ID: 5}, SuccessfulPayment: &models.SuccessfulPayment{
+		Currency: "XTR", TotalAmount: 35, InvoicePayload: "ord1", TelegramPaymentChargeID: "ch1",
+	}}}
+	got, ok = toUpdate(paid)
+	if !ok || got.ChatID != 5 || got.Payment == nil || *got.Payment != (Payment{OrderID: "ord1", Currency: "XTR", Stars: 35, ChargeID: "ch1"}) {
+		t.Fatalf("successful_payment: ok=%v got=%+v", ok, got)
+	}
+}
