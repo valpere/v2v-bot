@@ -17,6 +17,8 @@ import (
 // Engine is the part of the engine client the adapter needs.
 type Engine interface {
 	Turn(ctx context.Context, chatID int64, ev engineclient.Event) (engineclient.Output, error)
+	PreCheckout(ctx context.Context, orderID string, stars int) (engineclient.Verdict, error)
+	Paid(ctx context.Context, orderID string, stars int, chargeID string) (duplicate bool, err error)
 }
 
 const (
@@ -58,6 +60,14 @@ func (a *Adapter) Run(ctx context.Context, updates <-chan telegram.Update) {
 // first contact. This keeps one chat's turns in strict arrival order while
 // different chats run concurrently.
 func (a *Adapter) dispatch(ctx context.Context, u telegram.Update) {
+	if u.PreCheckout != nil || u.Payment != nil {
+		a.wg.Add(1)
+		go func() {
+			defer a.wg.Done()
+			a.handlePayment(ctx, u)
+		}()
+		return
+	}
 	// The non-blocking send happens under a.mu so an idle worker cannot be
 	// evicted between "found its queue" and "queued the update".
 	a.mu.Lock()

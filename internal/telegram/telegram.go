@@ -37,6 +37,25 @@ type Update struct {
 
 	CallbackData string // an inline-keyboard tap's payload; empty for anything else
 	CallbackID   string // that tap's callback query id — AnswerCallback needs it
+
+	PreCheckout *PreCheckout // a pre_checkout_query: the payer is about to pay; answer within 10 s
+	Payment     *Payment     // a successful_payment service message
+}
+
+// PreCheckout is Telegram's last-chance question before it takes the money.
+type PreCheckout struct {
+	ID       string // AnswerPreCheckout needs it
+	OrderID  string // the invoice payload
+	Currency string
+	Stars    int // total_amount; for XTR one unit is one Star
+}
+
+// Payment is a completed payment.
+type Payment struct {
+	OrderID  string
+	Currency string
+	Stars    int
+	ChargeID string // telegram_payment_charge_id — what a refund needs
 }
 
 // Button is one inline-keyboard button: Label is what the user sees, Data is
@@ -64,6 +83,8 @@ type Client interface {
 	// SendButtons sends text with an inline keyboard, one button per row
 	// (a handful of topics never needs a denser layout).
 	SendButtons(ctx context.Context, chatID int64, text string, buttons []Button) error
+	// AnswerPreCheckout answers a pre_checkout_query; errMsg is shown to the payer when ok is false.
+	AnswerPreCheckout(ctx context.Context, id string, ok bool, errMsg string) error
 	// AnswerCallback acks an inline-keyboard tap — Telegram requires this or
 	// the tapped button shows a spinner until it times out client-side.
 	AnswerCallback(ctx context.Context, callbackID string) error
@@ -84,7 +105,7 @@ func New(token string) (Client, error) {
 
 	b, err := bot.New(token,
 		bot.WithDefaultHandler(c.dispatch),
-		bot.WithAllowedUpdates(bot.AllowedUpdates{"message", "callback_query"}),
+		bot.WithAllowedUpdates(bot.AllowedUpdates{"message", "callback_query", "pre_checkout_query"}),
 		// One synchronous worker with a cap-1 buffer: the getUpdates loop
 		// stalls on our blocking dispatch until cmd/bot pulls the update,
 		// so at most ~2 updates are acked-but-undelivered on a crash
@@ -122,6 +143,13 @@ func (c *client) dispatch(ctx context.Context, _ *bot.Bot, u *models.Update) {
 }
 
 func toUpdate(u *models.Update) (Update, bool) {
+	if pq := u.PreCheckoutQuery; pq != nil {
+		if pq.From == nil || pq.From.ID == 0 {
+			return Update{}, false
+		}
+		// the payer's user id is their private chat id
+		return Update{ChatID: pq.From.ID, PreCheckout: &PreCheckout{ID: pq.ID, OrderID: pq.InvoicePayload, Currency: pq.Currency, Stars: pq.TotalAmount}}, true
+	}
 	if cq := u.CallbackQuery; cq != nil {
 		// An inaccessible message (too old, or the chat became inaccessible)
 		// carries no *Message, but InaccessibleMessage still has the chat —
@@ -144,6 +172,9 @@ func toUpdate(u *models.Update) (Update, bool) {
 	m := u.Message
 	if m == nil || m.Chat.ID == 0 {
 		return Update{}, false
+	}
+	if sp := m.SuccessfulPayment; sp != nil {
+		return Update{ChatID: m.Chat.ID, Payment: &Payment{OrderID: sp.InvoicePayload, Currency: sp.Currency, Stars: sp.TotalAmount, ChargeID: sp.TelegramPaymentChargeID}}, true
 	}
 	switch {
 	case m.Voice != nil && m.Voice.FileID != "":
@@ -367,6 +398,17 @@ func (c *client) SendButtons(ctx context.Context, chatID int64, text string, but
 func (c *client) AnswerCallback(ctx context.Context, callbackID string) error {
 	if _, err := c.b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{CallbackQueryID: callbackID}); err != nil {
 		return fmt.Errorf("telegram: answerCallbackQuery: %w", err)
+	}
+	return nil
+}
+
+func (c *client) AnswerPreCheckout(ctx context.Context, id string, ok bool, errMsg string) error {
+	p := &bot.AnswerPreCheckoutQueryParams{PreCheckoutQueryID: id, OK: ok}
+	if !ok {
+		p.ErrorMessage = errMsg
+	}
+	if _, err := c.b.AnswerPreCheckoutQuery(ctx, p); err != nil {
+		return fmt.Errorf("telegram: answerPreCheckoutQuery: %w", err)
 	}
 	return nil
 }

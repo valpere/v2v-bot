@@ -149,3 +149,80 @@ func (c *Client) Turn(ctx context.Context, chatID int64, ev Event) (Output, erro
 	}
 	return out, nil
 }
+
+// Verdict is the engine's answer to "may this order be paid?".
+type Verdict struct {
+	OK    bool
+	Error string // text for the payer when OK is false
+}
+
+// paidAttempts bounds how often a payment confirmation is sent; retryWait is the
+// pause before the next attempt (a var so tests need not really sleep).
+const paidAttempts = 4
+
+var retryWait = 500 * time.Millisecond
+
+// post sends one payments request and decodes the JSON answer into out. The
+// returned status is 0 for a transport failure.
+func (c *Client) post(ctx context.Context, path string, body, out any) (int, error) {
+	b, err := json.Marshal(body)
+	if err != nil {
+		return 0, err
+	}
+	hr, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+path, bytes.NewReader(b))
+	if err != nil {
+		return 0, err
+	}
+	hr.Header.Set("Authorization", "Bearer "+c.key)
+	hr.Header.Set("Content-Type", "application/json")
+	resp, err := c.http.Do(hr)
+	if err != nil {
+		return 0, fmt.Errorf("engine %s: %w", path, errors.Unwrap(err)) // drop the URL from the message
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+		return resp.StatusCode, fmt.Errorf("engine %s: status %d", path, resp.StatusCode)
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(out); err != nil {
+		return resp.StatusCode, fmt.Errorf("engine %s: decode: %w", path, err)
+	}
+	return resp.StatusCode, nil
+}
+
+// PreCheckout asks whether order may be paid for stars Stars. Not retried: the
+// answer is due within Telegram's 10 s, and a failure is a refusal.
+func (c *Client) PreCheckout(ctx context.Context, orderID string, stars int) (Verdict, error) {
+	var r struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+	}
+	if _, err := c.post(ctx, "/v1/payments/pre-checkout", map[string]any{"order_id": orderID, "stars": stars}, &r); err != nil {
+		return Verdict{}, err
+	}
+	return Verdict{OK: r.OK, Error: r.Error}, nil
+}
+
+// Paid records a completed payment. The engine side is idempotent, so a
+// transport failure or 5xx is retried a few times; a 4xx is final. duplicate is
+// true when the engine had already recorded this charge.
+func (c *Client) Paid(ctx context.Context, orderID string, stars int, chargeID string) (duplicate bool, err error) {
+	body := map[string]any{"order_id": orderID, "stars": stars, "charge_id": chargeID}
+	for attempt := 1; ; attempt++ {
+		var r struct {
+			Duplicate bool `json:"duplicate"`
+		}
+		status, err := c.post(ctx, "/v1/payments/paid", body, &r)
+		if err == nil {
+			return r.Duplicate, nil
+		}
+		if (status >= 400 && status < 500) || attempt >= paidAttempts || ctx.Err() != nil {
+			return false, err
+		}
+		select {
+		case <-ctx.Done():
+			return false, err
+		case <-time.After(retryWait * time.Duration(attempt)):
+		}
+	}
+}

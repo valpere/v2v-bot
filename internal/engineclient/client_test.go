@@ -106,3 +106,69 @@ func TestTurnRejectsUnauthorizedAndBadEvents(t *testing.T) {
 		t.Fatal("an empty event must be refused before any request")
 	}
 }
+
+func TestPreCheckout(t *testing.T) {
+	var path, auth string
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path, auth = r.URL.Path, r.Header.Get("Authorization")
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		io.WriteString(w, `{"ok":false,"error":"Замовлення застаріло"}`)
+	}))
+	defer srv.Close()
+	v, err := New(srv.URL, key, time.Second).PreCheckout(context.Background(), "ord1", 35)
+	if err != nil || v.OK || v.Error != "Замовлення застаріло" {
+		t.Fatalf("verdict %+v err %v", v, err)
+	}
+	if path != "/v1/payments/pre-checkout" || auth != "Bearer "+key || body["order_id"] != "ord1" || body["stars"] != float64(35) {
+		t.Fatalf("request %s %q %v", path, auth, body)
+	}
+}
+
+func TestPaidRetriesTransientFailuresOnly(t *testing.T) {
+	old := retryWait
+	retryWait = time.Millisecond
+	defer func() { retryWait = old }()
+
+	var calls atomic.Int32
+	var last map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&last)
+		if calls.Add(1) < 3 {
+			http.Error(w, "boom", http.StatusBadGateway)
+			return
+		}
+		io.WriteString(w, `{"ok":true,"duplicate":true}`)
+	}))
+	defer srv.Close()
+	c := New(srv.URL, key, time.Second)
+	dup, err := c.Paid(context.Background(), "ord1", 35, "ch1")
+	if err != nil || !dup || calls.Load() != 3 {
+		t.Fatalf("dup=%v err=%v calls=%d", dup, err, calls.Load())
+	}
+	if last["order_id"] != "ord1" || last["charge_id"] != "ch1" || last["stars"] != float64(35) {
+		t.Fatalf("body %v", last)
+	}
+
+	// a 4xx is the engine's final word: no retry
+	calls.Store(0)
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		http.Error(w, `{"error":"unknown order"}`, http.StatusNotFound)
+	}))
+	defer srv2.Close()
+	if _, err := New(srv2.URL, key, time.Second).Paid(context.Background(), "x", 1, "c"); err == nil || calls.Load() != 1 {
+		t.Fatalf("4xx: err=%v calls=%d", err, calls.Load())
+	}
+
+	// persistent 5xx: gives up after a bounded number of attempts
+	calls.Store(0)
+	srv3 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		http.Error(w, "down", http.StatusServiceUnavailable)
+	}))
+	defer srv3.Close()
+	if _, err := New(srv3.URL, key, time.Second).Paid(context.Background(), "x", 1, "c"); err == nil || calls.Load() != int32(paidAttempts) {
+		t.Fatalf("5xx: err=%v calls=%d", err, calls.Load())
+	}
+}
